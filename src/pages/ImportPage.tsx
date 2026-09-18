@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { getCurrentImport, setImportColumns } from '../services/excelService'
+import { useContactImport } from '../hooks/useContactImport'
 
 export function ImportPage() {
   const navigate = useNavigate()
-  const importedFile = getCurrentImport()
+  const { importedFile, preparePreview, processingError } = useContactImport()
   const [nameColumnIndex, setNameColumnIndex] = useState(importedFile?.nameColumn?.index.toString() ?? '')
   const [phoneColumnIndex, setPhoneColumnIndex] = useState(importedFile?.phoneColumn?.index.toString() ?? '')
   const [mappingError, setMappingError] = useState('')
@@ -40,8 +40,9 @@ export function ImportPage() {
       return
     }
 
-    setImportColumns(selectedNameIndex, selectedPhoneIndex)
-    navigate('/preview')
+    if (preparePreview(selectedNameIndex, selectedPhoneIndex)) {
+      navigate('/preview')
+    }
   }
 
   return (
@@ -91,6 +92,8 @@ export function ImportPage() {
           </div>
         )}
       </div>
+
+      {processingError && <p className="import-error" role="alert">{processingError}</p>}
 
       <div className="page-actions">
         <Link className="button secondary" to="/">Back home</Link>

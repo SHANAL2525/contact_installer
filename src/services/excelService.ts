@@ -36,8 +36,6 @@ const errorMessages: Record<ExcelImportErrorCode, string> = {
   corrupted_file: 'This file could not be read. It may be damaged or use an unsupported format.',
 }
 
-let currentImport: ParsedSpreadsheet | null = null
-
 export class ExcelImportError extends Error {
   readonly code: ExcelImportErrorCode
 
@@ -73,8 +71,15 @@ function getFileType(fileName: string): SpreadsheetFileType {
 function detectColumn(
   columns: SpreadsheetColumn[],
   acceptedHeadings: Set<string>,
+  preferredHeading: string,
 ): SpreadsheetColumn | null {
-  return columns.find((column) => acceptedHeadings.has(normalizeHeading(column.heading))) ?? null
+  const preferredColumn = columns.find(
+    (column) => normalizeHeading(column.heading) === preferredHeading,
+  )
+
+  return preferredColumn
+    ?? columns.find((column) => acceptedHeadings.has(normalizeHeading(column.heading)))
+    ?? null
 }
 
 function hasExpectedExcelSignature(data: ArrayBuffer, fileType: SpreadsheetFileType): boolean {
@@ -96,7 +101,6 @@ function hasExpectedExcelSignature(data: ArrayBuffer, fileType: SpreadsheetFileT
 }
 
 export async function parseSpreadsheetFile(file: File): Promise<ParsedSpreadsheet> {
-  currentImport = null
   const fileType = getFileType(file.name)
 
   if (file.size === 0) {
@@ -165,11 +169,10 @@ export async function parseSpreadsheetFile(file: File): Promise<ParsedSpreadshee
       worksheetName,
       columns,
       rows,
-      nameColumn: detectColumn(columns, nameHeadings),
-      phoneColumn: detectColumn(columns, phoneHeadings),
+      nameColumn: detectColumn(columns, nameHeadings, 'name'),
+      phoneColumn: detectColumn(columns, phoneHeadings, 'contact number'),
     }
 
-    currentImport = parsedSpreadsheet
     return parsedSpreadsheet
   } catch (error) {
     if (error instanceof ExcelImportError) {
@@ -184,30 +187,23 @@ export function getExcelImportErrorMessage(error: unknown): string {
   return error instanceof ExcelImportError ? error.message : errorMessages.corrupted_file
 }
 
-export function getCurrentImport(): ParsedSpreadsheet | null {
-  return currentImport
-}
+export function setImportColumns(
+  importedFile: ParsedSpreadsheet,
+  nameColumnIndex: number,
+  phoneColumnIndex: number,
+): ParsedSpreadsheet {
+  const nameColumn = importedFile.columns.find((column) => column.index === nameColumnIndex)
+  const phoneColumn = importedFile.columns.find((column) => column.index === phoneColumnIndex)
 
-export function setImportColumns(nameColumnIndex: number, phoneColumnIndex: number): ParsedSpreadsheet {
-  if (!currentImport) {
-    throw new ExcelImportError('empty_file')
-  }
-
-  const nameColumn = currentImport.columns.find((column) => column.index === nameColumnIndex)
-  const phoneColumn = currentImport.columns.find((column) => column.index === phoneColumnIndex)
-
-  if (!nameColumn || !phoneColumn) {
+  if (!nameColumn || !phoneColumn || nameColumn.index === phoneColumn.index) {
     throw new ExcelImportError('missing_headings')
   }
 
-  currentImport = { ...currentImport, nameColumn, phoneColumn }
-  return currentImport
+  return { ...importedFile, nameColumn, phoneColumn }
 }
 
-export function getImportedContactRows(): ImportedContactRow[] {
-  const importedFile = currentImport
-
-  if (!importedFile?.nameColumn || !importedFile.phoneColumn) {
+export function getImportedContactRows(importedFile: ParsedSpreadsheet): ImportedContactRow[] {
+  if (!importedFile.nameColumn || !importedFile.phoneColumn) {
     return []
   }
 
