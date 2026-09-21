@@ -1,0 +1,24 @@
+{
+  "name": "contact-auto-save-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --configLoader runner",
+    "db:migrate:local": "wrangler d1 migrations apply contact-auto-save-local --local --persist-to .wrangler/state",
+    "dry-run": "wrangler deploy --dry-run --outdir .wrangler/dry-run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.13",
+    "@cloudflare/workers-types": "^5.20260920.1",
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.135.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  }
+}
