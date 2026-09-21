@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  connectGoogleContacts,
-  isGoogleContactsConnected,
+  isGoogleAccountAuthorized,
+  reauthorizeGoogleAccount,
 } from '../services/googleAuthService'
 import {
   getCurrentSaveSession,
   getSaveSession,
+  isAccountSpecificSaveSession,
   runSaveQueue,
 } from '../services/saveSessionService'
 import type { SaveSession } from '../types/saveSession'
@@ -18,7 +19,7 @@ export function SaveProgressPage() {
   const mountedRef = useRef(true)
   const [session, setSession] = useState<SaveSession | null>(null)
   const [pageError, setPageError] = useState('')
-  const [isRunning, setIsRunning] = useState(true)
+  const [isRunning, setIsRunning] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
 
   const startOrResumeQueue = useCallback(async (sessionId: string) => {
@@ -50,9 +51,7 @@ export function SaveProgressPage() {
       if (mountedRef.current) {
         setIsRunning(false)
         setPageError(
-          error instanceof Error
-            ? error.message
-            : 'Unable to continue this save session.',
+          error instanceof Error ? error.message : 'Unable to continue this save session.',
         )
       }
     }
@@ -72,16 +71,17 @@ export function SaveProgressPage() {
         }
 
         if (!loadedSession) {
-          setIsRunning(false)
           setPageError('No save session is available. Preview an import before saving.')
           return
         }
 
         setSession(loadedSession)
-        await startOrResumeQueue(loadedSession.id)
+
+        if (isAccountSpecificSaveSession(loadedSession)) {
+          await startOrResumeQueue(loadedSession.id)
+        }
       } catch (error) {
         if (mountedRef.current) {
-          setIsRunning(false)
           setPageError(
             error instanceof Error ? error.message : 'Unable to load this save session.',
           )
@@ -90,14 +90,18 @@ export function SaveProgressPage() {
     }
 
     void loadSession()
-
     return () => {
       mountedRef.current = false
     }
   }, [requestedSessionId, startOrResumeQueue])
 
-  async function handleReconnectAndResume() {
-    if (!session || isConnecting || isRunning) {
+  async function handleReauthorizeAndResume() {
+    if (
+      !session
+      || !session.destinationAccountId
+      || isConnecting
+      || isRunning
+    ) {
       return
     }
 
@@ -105,16 +109,13 @@ export function SaveProgressPage() {
     setPageError('')
 
     try {
-      if (!isGoogleContactsConnected()) {
-        await connectGoogleContacts()
-      }
-
+      await reauthorizeGoogleAccount(session.destinationAccountId)
       await startOrResumeQueue(session.id)
     } catch (error) {
       setPageError(
         error instanceof Error
           ? error.message
-          : 'Unable to reconnect to Google Contacts.',
+          : 'Unable to reauthorize the destination Google account.',
       )
     } finally {
       setIsConnecting(false)
@@ -125,29 +126,34 @@ export function SaveProgressPage() {
     return (
       <section className="screen centered-screen">
         <p className="eyebrow">Google Contacts</p>
-        <h1>{pageError ? 'Unable to save' : 'Loading save session'}</h1>
-        <p className="lede">{pageError || 'Preparing your contacts…'}</p>
-        {pageError && (
-          <div className="page-actions centered-actions">
-            <Link className="button primary" to="/preview">Return to preview</Link>
-          </div>
-        )}
+        <h1>{pageError ? 'Session unavailable' : 'Loading session'}</h1>
+        <p className="lede">{pageError || 'Reading the saved session…'}</p>
+        <div className="page-actions centered-actions">
+          <Link className="button primary" to="/history">Return to history</Link>
+        </div>
       </section>
     )
   }
 
-  const processedCount = session.successCount + session.failedCount
+  const accountSpecific = isAccountSpecificSaveSession(session)
+  const itemSkippedCount = session.items.filter((item) => item.status === 'skipped').length
+  const processedCount = session.successCount + session.failedCount + itemSkippedCount
   const progressPercent = session.totalNewContacts === 0
     ? 100
     : Math.round((processedCount / session.totalNewContacts) * 100)
   const isPaused = session.status === 'paused'
+  const isChecking = session.status === 'checking'
 
   return (
     <section className="screen save-progress-screen">
       <div className="page-intro compact">
         <p className="eyebrow">Google Contacts</p>
-        <h1>Saving Contacts</h1>
-        <p className="lede">Saving new contacts from {session.sourceFileName} one at a time.</p>
+        <h1>{accountSpecific ? 'Saving Contacts' : 'Saved Progress'}</h1>
+        <p className="lede">
+          {accountSpecific
+            ? <>Destination: <strong>{session.destinationEmail}</strong></>
+            : <>Existing progress for {session.sourceFileName} is preserved and remains read-only.</>}
+        </p>
       </div>
 
       <section className="save-progress-card" aria-live="polite">
@@ -169,37 +175,52 @@ export function SaveProgressPage() {
 
         <div className="save-progress-meta">
           <span>{processedCount} processed</span>
+          <span>{itemSkippedCount} existing</span>
           <span>{session.failedCount} failed</span>
         </div>
       </section>
 
-      {isPaused && (
+      {!accountSpecific && (
+        <div className="save-paused-card" role="note">
+          <h2>Resume safely disabled</h2>
+          <p>This older session has no verified destination account identity. It will not be assigned to a newly connected account.</p>
+          <button className="button primary" type="button" disabled>Resume unavailable</button>
+        </div>
+      )}
+
+      {accountSpecific && isPaused && (
         <div className="save-paused-card" role="alert">
           <h2>Save paused</h2>
-          <p>{session.pauseReason || 'Reconnect Google Contacts to continue safely.'}</p>
+          <p>{session.pauseReason || `Reauthorize ${session.destinationEmail} to continue safely.`}</p>
           <button
             className="button primary"
             type="button"
             disabled={isConnecting || isRunning}
-            onClick={handleReconnectAndResume}
+            onClick={handleReauthorizeAndResume}
           >
             {isConnecting
-              ? 'Connecting…'
-              : isGoogleContactsConnected()
-                ? 'Resume Save'
-                : 'Connect Gmail & Resume'}
+              ? 'Reauthorizing…'
+              : session.destinationAccountId
+                && isGoogleAccountAuthorized(session.destinationAccountId)
+                ? 'Retry Duplicate Check'
+                : `Reauthorize ${session.destinationEmail}`}
           </button>
         </div>
       )}
 
       {pageError && <p className="import-error" role="alert">{pageError}</p>}
 
-      {!isPaused && isRunning && (
-        <p className="save-running-note" role="status">Creating contacts safely. Keep this page open.</p>
+      {accountSpecific && isRunning && (
+        <p className="save-running-note" role="status">
+          {isChecking
+            ? `Checking existing contacts in ${session.destinationEmail}…`
+            : `Creating contacts sequentially in ${session.destinationEmail}. Keep this page open.`}
+        </p>
       )}
 
       <div className="page-actions">
-        <Link className="button secondary" to="/preview">Back to preview</Link>
+        <Link className="button secondary" to="/history">View history</Link>
+        <Link className="button secondary" to="/accounts">Manage accounts</Link>
       </div>
     </section>
   )

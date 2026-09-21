@@ -4,6 +4,7 @@ import { listSaveSessions } from '../services/saveSessionService'
 import type { SaveSessionRecord, SaveSessionStatus } from '../types/saveSession'
 
 const statusLabels: Record<SaveSessionStatus, string> = {
+  checking: 'Checking',
   saving: 'Saving',
   paused: 'Paused',
   completed: 'Completed',
@@ -79,7 +80,7 @@ export function HistoryPage() {
             <Link
               className="history-card"
               key={session.id}
-              to={session.status === 'saving' || session.status === 'paused'
+              to={['checking', 'saving', 'paused'].includes(session.status)
                 ? `/saving?sessionId=${encodeURIComponent(session.id)}`
                 : `/success?sessionId=${encodeURIComponent(session.id)}`}
             >
@@ -87,6 +88,8 @@ export function HistoryPage() {
                 <div>
                   <h2>{session.sourceFileName}</h2>
                   <span>{formatSessionDate(session.startedAt)}</span>
+                  {session.destinationEmail && <span>{session.destinationEmail}</span>}
+                  {!session.destinationEmail && <span>Legacy session — destination unavailable</span>}
                 </div>
                 <span className={`history-status history-${session.status}`}>
                   {statusLabels[session.status]}

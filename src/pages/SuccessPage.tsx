@@ -61,7 +61,10 @@ export function SuccessPage() {
       <span className="success-icon" aria-hidden="true">✓</span>
       <p className="eyebrow">Complete</p>
       <h1>CONTACTS SAVED</h1>
-      <p className="lede">Google Contacts finished processing {session.sourceFileName}.</p>
+      <p className="lede">
+        Google Contacts finished processing {session.sourceFileName}
+        {session.destinationEmail ? ` for ${session.destinationEmail}` : ''}.
+      </p>
 
       <div className="save-result-summary" aria-label="Save result">
         <div><span>Saved</span><strong>{session.successCount}</strong></div>

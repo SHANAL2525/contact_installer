@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useContactImport } from '../hooks/useContactImport'
-import { useStartSaveSession } from '../hooks/useStartSaveSession'
 import type { ProcessedContact, ProcessedContactStatus } from '../types/contact'
 
 type ContactFilter = 'all' | ProcessedContactStatus
@@ -25,7 +24,6 @@ export function ContactListPage() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editedName, setEditedName] = useState('')
   const [editedPhone, setEditedPhone] = useState('')
-  const { isStartingSave, saveStartError, startSave } = useStartSaveSession()
 
   const filteredContacts = useMemo(() => (
     activeFilter === 'all'
@@ -154,23 +152,9 @@ export function ContactListPage() {
         </div>
       )}
 
-      {saveStartError && (
-        <div className="save-connection-warning" role="alert">
-          <p>{saveStartError}</p>
-          <Link className="button secondary" to="/">Connect Google Contacts</Link>
-        </div>
-      )}
-
       <div className="page-actions">
         <Link className="button secondary" to="/preview">Back to summary</Link>
-        <button
-          className="button primary"
-          type="button"
-          disabled={isStartingSave}
-          onClick={startSave}
-        >
-          {isStartingSave ? 'Preparing save…' : 'Continue to Save'}
-        </button>
+        <Link className="button primary" to="/preview">Choose Save Destination</Link>
       </div>
     </section>
   )
