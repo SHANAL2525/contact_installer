@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   getCurrentSaveSession,
   getSaveSession,
+  isAccountSpecificSaveSession,
   prepareFailedContactsForRetry,
 } from '../services/saveSessionService'
 import type { SaveSession } from '../types/saveSession'
@@ -47,7 +48,7 @@ export function FailedContactsPage() {
   }, [sessionId])
 
   async function handleRetryFailedContacts() {
-    if (!session || isPreparingRetry) {
+    if (!session || isPreparingRetry || !isAccountSpecificSaveSession(session)) {
       return
     }
 
@@ -66,13 +67,18 @@ export function FailedContactsPage() {
   }
 
   const failedContacts = session?.items.filter((item) => item.status === 'failed') ?? []
+  const canRetry = Boolean(session && isAccountSpecificSaveSession(session))
 
   return (
     <section className="screen">
       <div className="page-intro compact">
         <p className="eyebrow">Save issues</p>
         <h1>Failed Contacts</h1>
-        <p className="lede">Only these unsuccessful contacts will be retried. Saved contacts remain untouched.</p>
+        <p className="lede">
+          {canRetry
+            ? `Retrying will first check ${session?.destinationEmail} for existing phone numbers.`
+            : 'Existing failed-contact details remain available, but legacy sessions cannot be retried without a verified destination.'}
+        </p>
       </div>
 
       {pageError && <p className="import-error" role="alert">{pageError}</p>}
@@ -109,10 +115,14 @@ export function FailedContactsPage() {
           <button
             className="button primary"
             type="button"
-            disabled={isPreparingRetry}
+            disabled={!canRetry || isPreparingRetry}
             onClick={handleRetryFailedContacts}
           >
-            {isPreparingRetry ? 'Preparing retry…' : 'Retry Failed Contacts'}
+            {isPreparingRetry
+              ? 'Preparing Safe Retry…'
+              : canRetry
+                ? 'Check Duplicates & Retry'
+                : 'Retry unavailable for legacy session'}
           </button>
         )}
       </div>

@@ -1,6 +1,9 @@
 import { useCallback, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { isGoogleContactsConnected } from '../services/googleAuthService'
+import {
+  isGoogleAccountAuthorized,
+  type GoogleAccount,
+} from '../services/googleAuthService'
 import {
   createSaveSession,
   getCurrentSaveSession,
@@ -14,15 +17,15 @@ export function useStartSaveSession() {
   const [isStartingSave, setIsStartingSave] = useState(false)
   const [saveStartError, setSaveStartError] = useState('')
 
-  const startSave = useCallback(async () => {
+  const startSave = useCallback(async (destinationAccount: GoogleAccount) => {
     if (startLock.current) {
       return
     }
 
     setSaveStartError('')
 
-    if (!isGoogleContactsConnected()) {
-      setSaveStartError('Connect your Google Contacts account before saving.')
+    if (!isGoogleAccountAuthorized(destinationAccount.id)) {
+      setSaveStartError(`Reauthorize ${destinationAccount.email} before saving.`)
       return
     }
 
@@ -40,19 +43,26 @@ export function useStartSaveSession() {
       if (
         currentSession
         && currentSession.sourceFileName === importedFile.fileName
-        && ['saving', 'paused'].includes(currentSession.status)
+        && currentSession.destinationAccountId === destinationAccount.id
+        && ['checking', 'saving', 'paused'].includes(currentSession.status)
       ) {
         navigate(`/saving?sessionId=${encodeURIComponent(currentSession.id)}`)
         return
       }
 
       const refreshedContacts = revalidateContactsForSave()
-      const session = await createSaveSession(importedFile.fileName, refreshedContacts)
+      const session = await createSaveSession(
+        importedFile.fileName,
+        refreshedContacts,
+        destinationAccount.id,
+      )
       navigate(`/saving?sessionId=${encodeURIComponent(session.id)}`)
-    } catch {
+    } catch (error) {
       startLock.current = false
       setIsStartingSave(false)
-      setSaveStartError('Unable to start this save. Please try again.')
+      setSaveStartError(
+        error instanceof Error ? error.message : 'Unable to start this save. Please try again.',
+      )
     }
   }, [importedFile, navigate, revalidateContactsForSave])
 

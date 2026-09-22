@@ -6,12 +6,14 @@ import type {
 } from '../types/saveSession'
 import { readStorage, writeStorage } from '../utils/storage'
 import {
+  getGoogleAccount,
   GoogleAuthorizationError,
-  isGoogleContactsConnected,
+  isGoogleAccountAuthorized,
 } from './googleAuthService'
 import {
   createGoogleContact,
   GoogleContactsRequestError,
+  listExistingGooglePhoneNumbers,
 } from './googleContactsService'
 
 const DATABASE_NAME = 'contact-auto-save'
@@ -20,8 +22,6 @@ const SESSION_STORE = 'saveSessions'
 const ITEM_STORE = 'saveSessionItems'
 const SESSION_INDEX = 'sessionId'
 const CURRENT_SESSION_KEY = 'current-save-session-id'
-const MAX_TEMPORARY_RETRIES = 3
-const RETRY_DELAYS_MS = [500, 1000, 2000]
 
 type SaveProgressListener = (session: SaveSession) => void
 
@@ -79,19 +79,53 @@ function transactionComplete(transaction: IDBTransaction): Promise<void> {
   })
 }
 
+function normalizeSessionRecord(record: SaveSessionRecord): SaveSessionRecord {
+  const isAccountSpecific = (
+    record.schemaVersion === 2
+    && typeof record.destinationAccountId === 'string'
+    && record.destinationAccountId.length > 0
+    && typeof record.destinationEmail === 'string'
+    && record.destinationEmail.includes('@')
+  )
+
+  return {
+    ...record,
+    schemaVersion: isAccountSpecific ? 2 : 1,
+    destinationAccountId: isAccountSpecific ? record.destinationAccountId : null,
+    destinationEmail: isAccountSpecific ? record.destinationEmail : null,
+    sourceSkippedCount: Number.isInteger(record.sourceSkippedCount)
+      ? record.sourceSkippedCount
+      : record.skippedCount,
+    duplicateCheckCompletedAt:
+      typeof record.duplicateCheckCompletedAt === 'string'
+        ? record.duplicateCheckCompletedAt
+        : null,
+  }
+}
+
+function normalizeSaveItem(item: SaveContactItem): SaveContactItem {
+  return {
+    ...item,
+    skipReason: item.skipReason ?? null,
+  }
+}
+
 function toSessionRecord(session: SaveSession): SaveSessionRecord {
   const { items: _items, resourceNames: _resourceNames, ...record } = session
   return record
 }
 
 function buildSession(record: SaveSessionRecord, items: SaveContactItem[]): SaveSession {
-  const orderedItems = [...items].sort((first, second) => first.sequence - second.sequence)
+  const normalizedRecord = normalizeSessionRecord(record)
+  const orderedItems = items
+    .map(normalizeSaveItem)
+    .sort((first, second) => first.sequence - second.sequence)
 
   return {
-    ...record,
+    ...normalizedRecord,
     items: orderedItems,
     resourceNames: orderedItems.flatMap((item) => (
-      item.resourceName ? [item.resourceName] : []
+      item.status === 'saved' && item.resourceName ? [item.resourceName] : []
     )),
   }
 }
@@ -104,11 +138,21 @@ function cloneSession(session: SaveSession): SaveSession {
   }
 }
 
+export function isAccountSpecificSaveSession(session: SaveSessionRecord): boolean {
+  return (
+    session.schemaVersion === 2
+    && Boolean(session.destinationAccountId)
+    && Boolean(session.destinationEmail)
+  )
+}
+
 function refreshSessionCounts(session: SaveSession): void {
   session.successCount = session.items.filter((item) => item.status === 'saved').length
   session.failedCount = session.items.filter((item) => item.status === 'failed').length
+  session.skippedCount = session.sourceSkippedCount
+    + session.items.filter((item) => item.status === 'skipped').length
   session.resourceNames = session.items.flatMap((item) => (
-    item.resourceName ? [item.resourceName] : []
+    item.status === 'saved' && item.resourceName ? [item.resourceName] : []
   ))
   session.updatedAt = new Date().toISOString()
 }
@@ -146,60 +190,33 @@ function notifyListeners(run: ActiveSaveRun, session: SaveSession): void {
   run.listeners.forEach((listener) => listener(snapshot))
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
-}
-
-function isTemporaryError(error: unknown): boolean {
-  return (
-    (error instanceof GoogleContactsRequestError && error.retryable)
-    || error instanceof TypeError
-  )
-}
-
 function getReadableContactError(error: unknown): string {
-  if (error instanceof GoogleContactsRequestError) {
-    return error.message
+  if (error instanceof TypeError) {
+    return 'The contact result is uncertain because the network request failed. Retry will check Google Contacts before sending it again.'
   }
 
-  if (error instanceof TypeError) {
-    return 'A network error prevented this contact from being saved.'
+  if (error instanceof GoogleContactsRequestError) {
+    return `${error.message} It was not retried automatically.`
   }
 
   if (error instanceof Error && error.message) {
-    return error.message
+    return `${error.message} It was not retried automatically.`
   }
 
-  return 'Google could not save this contact.'
+  return 'Google could not save this contact. It was not retried automatically.'
 }
 
-async function createContactWithRetry(
-  item: SaveContactItem,
+async function pauseSession(
   session: SaveSession,
-): Promise<string> {
-  for (let retryCount = 0; retryCount <= MAX_TEMPORARY_RETRIES; retryCount += 1) {
-    item.attempts += 1
-    await persistItemAndSession(item, session)
-
-    try {
-      return await createGoogleContact({
-        displayName: item.saveDisplayName,
-        phone: item.normalizedPhone,
-      })
-    } catch (error) {
-      if (error instanceof GoogleAuthorizationError) {
-        throw error
-      }
-
-      if (!isTemporaryError(error) || retryCount === MAX_TEMPORARY_RETRIES) {
-        throw error
-      }
-
-      await delay(RETRY_DELAYS_MS[retryCount] ?? RETRY_DELAYS_MS.at(-1) ?? 2000)
-    }
-  }
-
-  throw new Error('Google could not save this contact after several attempts.')
+  run: ActiveSaveRun,
+  reason: string,
+): Promise<SaveSession> {
+  session.status = 'paused'
+  session.pauseReason = reason
+  refreshSessionCounts(session)
+  await persistSession(session)
+  notifyListeners(run, session)
+  return session
 }
 
 async function executeSaveQueue(
@@ -212,26 +229,61 @@ async function executeSaveQueue(
     throw new Error('This save session could not be found.')
   }
 
+  if (!isAccountSpecificSaveSession(session)) {
+    throw new Error('This older save session has no verified Google destination and cannot be resumed.')
+  }
+
+  const accountId = session.destinationAccountId
+  const destinationEmail = session.destinationEmail
   const hasPendingContacts = session.items.some((item) => item.status === 'pending')
 
   if (!hasPendingContacts) {
     return session
   }
 
-  if (!isGoogleContactsConnected()) {
-    session.status = 'paused'
-    session.pauseReason = 'Connect your Google Contacts account before saving.'
-    refreshSessionCounts(session)
-    await persistSession(session)
-    notifyListeners(run, session)
-    return session
+  if (!accountId || !destinationEmail || !isGoogleAccountAuthorized(accountId)) {
+    return pauseSession(
+      session,
+      run,
+      `Reauthorize ${destinationEmail ?? 'the destination account'} before continuing.`,
+    )
   }
 
-  session.status = 'saving'
+  session.status = 'checking'
   session.pauseReason = null
-  session.completedAt = null
   refreshSessionCounts(session)
   await persistSession(session)
+  notifyListeners(run, session)
+
+  let existingNumbers: Map<string, string | null>
+
+  try {
+    existingNumbers = await listExistingGooglePhoneNumbers(accountId)
+  } catch (error) {
+    const reason = error instanceof Error
+      ? error.message
+      : 'The existing-contact check failed.'
+
+    return pauseSession(
+      session,
+      run,
+      `${reason} No contacts were created for ${destinationEmail}.`,
+    )
+  }
+
+  session.items.forEach((item) => {
+    if (item.status === 'pending' && existingNumbers.has(item.normalizedPhone)) {
+      item.status = 'skipped'
+      item.skipReason = 'existing_google_contact'
+      item.resourceName = null
+      item.error = null
+    }
+  })
+
+  session.duplicateCheckCompletedAt = new Date().toISOString()
+  session.status = 'saving'
+  refreshSessionCounts(session)
+  await persistItemsAndSession(session)
   notifyListeners(run, session)
 
   for (const item of session.items) {
@@ -239,21 +291,26 @@ async function executeSaveQueue(
       continue
     }
 
+    item.attempts += 1
+    await persistItemAndSession(item, session)
+
     try {
-      item.resourceName = await createContactWithRetry(item, session)
+      item.resourceName = await createGoogleContact(accountId, {
+        displayName: item.saveDisplayName,
+        phone: item.normalizedPhone,
+      })
       item.status = 'saved'
+      item.skipReason = null
       item.error = null
     } catch (error) {
       if (error instanceof GoogleAuthorizationError) {
-        session.status = 'paused'
-        session.pauseReason = error.message
-        refreshSessionCounts(session)
         await persistItemAndSession(item, session)
-        notifyListeners(run, session)
-        return session
+        return pauseSession(session, run, error.message)
       }
 
       item.status = 'failed'
+      item.resourceName = null
+      item.skipReason = null
       item.error = getReadableContactError(error)
     }
 
@@ -268,7 +325,10 @@ async function executeSaveQueue(
 
   if (session.failedCount === 0) {
     session.status = 'completed'
-  } else if (session.successCount > 0) {
+  } else if (
+    session.successCount > 0
+    || session.items.some((item) => item.status === 'skipped')
+  ) {
     session.status = 'partial'
   } else {
     session.status = 'failed'
@@ -282,7 +342,14 @@ async function executeSaveQueue(
 export async function createSaveSession(
   sourceFileName: string,
   contacts: ProcessedContact[],
+  destinationAccountId: string,
 ): Promise<SaveSession> {
+  const destinationAccount = getGoogleAccount(destinationAccountId)
+
+  if (!destinationAccount || destinationAccount.status !== 'connected') {
+    throw new Error('The selected Google account must be reauthorized before saving.')
+  }
+
   const eligibleContacts = contacts.filter((contact) => (
     contact.status === 'new'
     && contact.isValid
@@ -302,12 +369,17 @@ export async function createSaveSession(
     normalizedPhone: contact.normalizedPhone,
     status: 'pending',
     resourceName: null,
+    skipReason: null,
     error: null,
     attempts: 0,
   }))
 
+  const sourceSkippedCount = contacts.length - items.length
   const session: SaveSession = {
+    schemaVersion: 2,
     id: sessionId,
+    destinationAccountId: destinationAccount.id,
+    destinationEmail: destinationAccount.email,
     sourceFileName,
     startedAt: now,
     updatedAt: now,
@@ -315,8 +387,10 @@ export async function createSaveSession(
     totalNewContacts: items.length,
     successCount: 0,
     failedCount: 0,
-    skippedCount: contacts.length - items.length,
-    status: items.length === 0 ? 'completed' : 'saving',
+    sourceSkippedCount,
+    skippedCount: sourceSkippedCount,
+    duplicateCheckCompletedAt: null,
+    status: items.length === 0 ? 'completed' : 'checking',
     pauseReason: null,
     items,
     resourceNames: [],
@@ -360,13 +434,25 @@ export async function listSaveSessions(): Promise<SaveSessionRecord[]> {
   ) as SaveSessionRecord[]
 
   await completed
-  return records.sort((first, second) => second.startedAt.localeCompare(first.startedAt))
+  return records
+    .map(normalizeSessionRecord)
+    .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
 }
 
 export async function runSaveQueue(
   sessionId: string,
   listener?: SaveProgressListener,
 ): Promise<SaveSession> {
+  const session = await getSaveSession(sessionId)
+
+  if (!session) {
+    throw new Error('This save session could not be found.')
+  }
+
+  if (!isAccountSpecificSaveSession(session)) {
+    throw new Error('This older save session has no verified Google destination and cannot be resumed.')
+  }
+
   const existingRun = activeSaveRuns.get(sessionId)
 
   if (existingRun?.promise) {
@@ -413,16 +499,23 @@ export async function prepareFailedContactsForRetry(
     throw new Error('This save session could not be found.')
   }
 
+  if (!isAccountSpecificSaveSession(session)) {
+    throw new Error('This older save session has no verified Google destination and cannot be retried.')
+  }
+
   session.items.forEach((item) => {
     if (item.status === 'failed') {
       item.status = 'pending'
+      item.resourceName = null
+      item.skipReason = null
       item.error = null
     }
   })
 
   session.status = 'paused'
-  session.pauseReason = 'Failed contacts are ready to retry.'
+  session.pauseReason = 'Failed contacts are ready for a fresh duplicate check before retrying.'
   session.completedAt = null
+  session.duplicateCheckCompletedAt = null
   refreshSessionCounts(session)
   await persistItemsAndSession(session)
   writeStorage(CURRENT_SESSION_KEY, session.id)

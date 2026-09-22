@@ -1,0 +1,11 @@
+import { configDefaults, defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    setupFiles: ['./tests/setup.ts'],
+    clearMocks: true,
+    restoreMocks: true,
+    exclude: [...configDefaults.exclude, 'worker/**'],
+  },
+})
